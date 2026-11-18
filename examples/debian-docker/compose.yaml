@@ -1,0 +1,28 @@
+services:
+  audiobooksync-watcher:
+    build:
+      context: ../..
+      dockerfile: examples/debian-docker/Dockerfile
+    container_name: audiobooksync-watcher
+    user: "${PUID:-1000}:${PGID:-1000}"
+    group_add:
+      - "${RENDER_GID:-105}"
+    devices:
+      - /dev/dri:/dev/dri
+    init: true
+    environment:
+      MEDIA_ROOT: /audiobooks
+      CALIBRE_ROOT: /calibre-books
+      AUDIOSYNC_SOURCE: /audiobooksync
+      DEBOUNCE_SECONDS: "${DEBOUNCE_SECONDS:-90}"
+      UV_CACHE_DIR: /cache/uv
+      HF_HOME: /cache/huggingface
+      XDG_CACHE_HOME: /cache/xdg
+      OPENVINO_CACHE_DIR: /cache/openvino
+      HOME: /cache
+    volumes:
+      - "${AUDIOBOOKS_DIR:-/media/audiobooks}:/audiobooks"
+      - "${CALIBRE_LIBRARY_DIR:-/media/books}:/calibre-books:ro"
+      - ../..:/audiobooksync:ro
+      - ./cache:/cache
+    restart: unless-stopped

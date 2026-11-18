@@ -33,6 +33,8 @@ Speed depends on your GPU. The biggest book I have (62 hours) took 20 minutes on
 
 The aligner prefers an Intel GPU through the OpenVINO Execution Provider, then falls back to CUDA and CPU. The OpenVINO plugin needs a compatible ONNX Runtime (1.30 or newer), the `onnxruntime-ep-openvino` package, and access to the Intel graphics device. In Debian-based Docker images, install `intel-opencl-icd`; pass `/dev/dri` and grant the container access to the host `render` group. VAAPI support alone does not provide the OpenCL compute runtime. If OpenVINO cannot find or initialize the GPU, the selected provider is reported and the aligner falls back.
 
+For a complete Debian Docker Compose deployment with an optional Calibre library watcher, see the [Intel GPU setup guide](docs/debian-intel-gpu-setup.md).
+
 ## Reading the synced books
 
 1. Trigger a library scan in audiobookshelf. On the web client you'll see a `.smil` file listed under the "Library files" section of an audiobook.

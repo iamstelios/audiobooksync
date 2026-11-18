@@ -16,6 +16,10 @@ build-tools/
 # Local virtualenvs
 .venv*/
 
+# Local Debian watcher configuration and caches
+/examples/debian-docker/.env
+/examples/debian-docker/cache/
+
 # Byte-compiled
 __pycache__/
 *.py[cod]
