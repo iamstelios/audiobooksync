@@ -6,7 +6,10 @@ model only reports how likely each frame is for each label.
 """
 from __future__ import annotations
 
+import json
+import hashlib
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -31,18 +34,132 @@ MEL_BINS = 80
 SAMPLE_RATE = 16000
 
 
-def load_session(path: str | Path, providers: list[str] | None = None):
-    """Open an onnxruntime session, preferring the GPU, and return it with the providers in use.
+def _openvino_provider_errors(ort):
+    state = ort.capi.onnxruntime_pybind11_state
+    return (
+        ImportError,
+        OSError,
+        RuntimeError,
+        AttributeError,
+        TypeError,
+        ValueError,
+        state.Fail,
+        state.RuntimeException,
+        state.InvalidArgument,
+        state.NotImplemented,
+    )
 
-    onnxruntime falls back to the CPU silently, so the caller reports what was actually used.
-    """
+
+def _stage_openvino_model(path: str | Path) -> Path:
+    model_path = Path(path)
+    external_data_path = Path(f"{model_path}_data")
+    if not external_data_path.exists():
+        return model_path
+
+    model_directory = model_path.parent.resolve()
+    if external_data_path.resolve().is_relative_to(model_directory):
+        return model_path
+
+    cache_dir = Path(
+        os.environ.get(
+            "OPENVINO_CACHE_DIR",
+            str(Path.home() / ".cache" / "audiobooksync-openvino"),
+        )
+    )
+    source_paths = (model_path, external_data_path)
+    cache_key = hashlib.sha256(
+        "|".join(str(source.resolve()) for source in source_paths).encode()
+    ).hexdigest()[:16]
+    staged_directory = cache_dir / "models" / cache_key
+    staged_directory.mkdir(parents=True, exist_ok=True)
+
+    for source in source_paths:
+        resolved_source = source.resolve(strict=True)
+        destination = staged_directory / source.name
+        if (
+            destination.is_file()
+            and not destination.is_symlink()
+            and destination.stat().st_size == resolved_source.stat().st_size
+        ):
+            continue
+
+        temporary = destination.with_name(destination.name + ".tmp")
+        destination.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+        try:
+            try:
+                os.link(resolved_source, temporary)
+            except OSError:
+                shutil.copy2(resolved_source, temporary)
+            os.replace(temporary, destination)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    return staged_directory / model_path.name
+
+
+def _openvino_gpu_session(path: str | Path, ort, progress):
+    try:
+        import onnxruntime_ep_openvino as openvino_ep
+    except (ImportError, OSError) as error:
+        progress(f"OpenVINO plugin unavailable; trying CUDA/CPU: {error}")
+        return None
+
+    try:
+        ort.register_execution_provider_library("openvino_ep", openvino_ep.get_library_path())
+        ep_name = openvino_ep.get_ep_name()
+        gpu_devices = [
+            device
+            for device in ort.get_ep_devices()
+            if device.ep_name == ep_name and device.ep_metadata.get("ov_device") == "GPU"
+        ]
+    except _openvino_provider_errors(ort) as error:
+        progress(f"OpenVINO GPU discovery failed; trying CUDA/CPU: {error}")
+        return None
+
+    if not gpu_devices:
+        progress("OpenVINO did not find an Intel GPU; trying CUDA/CPU")
+        return None
+
+    try:
+        options = ort.SessionOptions()
+        options.log_severity_level = 3
+        provider_options = {}
+        cache_dir = os.environ.get("OPENVINO_CACHE_DIR")
+        if cache_dir:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            provider_options["load_config"] = json.dumps({"GPU": {"CACHE_DIR": cache_dir}})
+        options.add_provider_for_devices(gpu_devices, provider_options)
+        session = ort.InferenceSession(
+            str(_stage_openvino_model(path)),
+            sess_options=options,
+        )
+    except _openvino_provider_errors(ort) as error:
+        progress(f"OpenVINO GPU session failed; trying CUDA/CPU: {error}")
+        return None
+
+    return session, f"{ep_name} (GPU)"
+
+
+def load_session(
+    path: str | Path,
+    providers: list[str] | None = None,
+    progress=lambda _message: None,
+):
+    """Open a session, preferring Intel OpenVINO GPU, then CUDA and CPU."""
     import onnxruntime as ort
+
+    if providers is None:
+        openvino_session = _openvino_gpu_session(path, ort, progress)
+        if openvino_session is not None:
+            session, provider = openvino_session
+            return session, [provider]
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
     options = ort.SessionOptions()
     options.log_severity_level = 3
-
-    candidates = providers or ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    session = ort.InferenceSession(str(path), options, providers=candidates)
+    session = ort.InferenceSession(str(path), options, providers=providers)
     return session, session.get_providers()
 
 
@@ -73,7 +190,7 @@ class OnnxParakeetAligner:
         self.blank_id = BLANK_ID
         self._word_ids: dict[str, list[int]] = {}
 
-        self.session, self.providers = load_session(files.graph, providers)
+        self.session, self.providers = load_session(files.graph, providers, progress)
         progress(f"model: encoding on {self.providers[0]}")
         inputs = self.session.get_inputs()
         self.input_name = inputs[0].name
